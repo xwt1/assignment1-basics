@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import regex as re
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
 
@@ -589,4 +590,100 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    # 1. 读取训练数据
+    train_data = read_corpus(input_path)
+    # 2. 利用特殊词元标记边界
+    boundries = find_chunk_boundaries(train_data, vocab_size, special_tokens)
+    # 3. 处理出文本片段chunks
+    chunks = [train_data[boundries[i]:boundries[i + 1]] for i in range(len(boundries) - 1)]
+    # 4. 统计词频，建立初始词表，对于每一个chunk，单独做pre_tokenize，最后合并起来
+    tokens_dic = {}
+    for item in chunks:
+        tokens_dic_temp = pre_tokenize(item)
+        for token, count in tokens_dic_temp.items():
+            if token in tokens_dic:
+                tokens_dic[token] += count
+            else:
+                tokens_dic[token] = count
+    # 5. 根据BPE迭代训练tokens_dic，得到最终的vocab
+    
+
+
+
+def read_corpus(input_path: str | os.PathLike) -> str:
+    with open(input_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    return text
+    
+# def deal_with_special_tokens(text: str, special_tokens: list[str]) -> str:
+    
+#     # 把 special_tokens 转换成一个正则表达式模式，用于在文本中查找这些特殊标记
+#     special_tokens_pattern = "(" + "|".join(re.escape(tok) for tok in special_tokens) + ")"
+    
+    
+
+#     # This is a placeholder function to show where you might want to handle special tokens in the training data.
+#     # Depending on your implementation, you may want to replace occurrences of special tokens in the text with unique placeholders
+#     # that won't be split during BPE training, and then add the special tokens to the vocabulary at the end.
+#     return text
+
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    split_special_token: bytes,
+) -> list[int]:
+    """
+    Chunk the file into parts that can be counted independently.
+    May return fewer chunks if the boundaries end up overlapping.
+    """
+    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+
+    # Get total file size in bytes
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    # Initial guesses for chunk boundary locations, uniformly spaced
+    # Chunks start on previous index, don't include last index
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)  # Start at boundary guess
+        while True:
+            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+
+            # If EOF, this boundary should be at the end of the file
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Find the special token in the mini chunk
+            found_at = mini_chunk.find(split_special_token)
+            if found_at != -1:
+                chunk_boundaries[bi] = initial_position + found_at
+                break
+            initial_position += mini_chunk_size
+
+    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    return sorted(set(chunk_boundaries))
+
+def pre_tokenize(text: str) -> dict[str, int]:
+
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    tokens = {}
+    for item in re.finditer(PAT, text):
+        token = item.group()
+        # start = item.start()
+        if token not in tokens:
+            tokens[token] = 1
+        else:
+            tokens[token] += 1
+    return tokens
+        
+    
