@@ -571,119 +571,243 @@ def run_train_bpe(
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """Given the path to an input corpus, run train a BPE tokenizer and
     output its vocabulary and merges.
-
-    Args:
-        input_path (str | os.PathLike): Path to BPE tokenizer training data.
-        vocab_size (int): Total number of items in the tokenizer's vocabulary (including special tokens).
-        special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
-            These strings will never be split into multiple tokens, and will always be
-            kept as a single token. If these special tokens occur in the `input_path`,
-            they are treated as any other string.
-
-    Returns:
-        tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-            vocab:
-                The trained tokenizer vocabulary, a mapping from int (token ID in the vocabulary)
-                to bytes (token bytes)
-            merges:
-                BPE merges. Each list item is a tuple of bytes (<token1>, <token2>),
-                representing that <token1> was merged with <token2>.
-                Merges are ordered by order of creation.
     """
     # 1. 读取训练数据
     train_data = read_corpus(input_path)
+
     # 2. 利用特殊词元标记边界
-    boundries = find_chunk_boundaries(train_data, vocab_size, special_tokens)
-    # 3. 处理出文本片段chunks
-    chunks = [train_data[boundries[i]:boundries[i + 1]] for i in range(len(boundries) - 1)]
-    # 4. 统计词频，建立初始词表，对于每一个chunk，单独做pre_tokenize，最后合并起来
-    tokens_dic = {}
-    for item in chunks:
-        tokens_dic_temp = pre_tokenize(item)
+    boundaries = find_chunk_boundaries(train_data, split_special_tokens=special_tokens)
+
+    # 3. 统计 pre-token 词频
+    tokens_dic: dict[tuple[bytes, ...], int] = {}
+
+    for start, end in boundaries:
+        text = train_data[start:end].decode("utf-8")
+        tokens_dic_temp = pre_tokenize(text)
+
         for token, count in tokens_dic_temp.items():
-            if token in tokens_dic:
-                tokens_dic[token] += count
-            else:
-                tokens_dic[token] = count
-    # 5. 根据BPE迭代训练tokens_dic，得到最终的vocab
-    
+            tokens_dic[token] = tokens_dic.get(token, 0) + count
 
+    # 4. 初始化 byte-level BPE 词表
+    vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
 
+    for special_token in special_tokens:
+        vocab[len(vocab)] = special_token.encode("utf-8")
 
-def read_corpus(input_path: str | os.PathLike) -> str:
-    with open(input_path, "r", encoding="utf-8") as f:
-        text = f.read()
-    return text
-    
-# def deal_with_special_tokens(text: str, special_tokens: list[str]) -> str:
-    
-#     # 把 special_tokens 转换成一个正则表达式模式，用于在文本中查找这些特殊标记
-#     special_tokens_pattern = "(" + "|".join(re.escape(tok) for tok in special_tokens) + ")"
-    
-    
+    merge_rule: list[tuple[bytes, bytes]] = []
 
-#     # This is a placeholder function to show where you might want to handle special tokens in the training data.
-#     # Depending on your implementation, you may want to replace occurrences of special tokens in the text with unique placeholders
-#     # that won't be split during BPE training, and then add the special tokens to the vocabulary at the end.
-#     return text
+    # 5. 把 tokens_dic 转成可变结构
+    # words[word_id] 是当前 pre-token 的 BPE token 序列
+    # word_freqs[word_id] 是这个 pre-token 的出现次数
+    words: list[list[bytes]] = []
+    word_freqs: list[int] = []
+
+    for token, count in tokens_dic.items():
+        words.append(list(token))
+        word_freqs.append(count)
+
+    # 6. 维护 pair 的全局频率，以及 pair 出现在哪些 word 中
+    pair_counts: dict[tuple[bytes, bytes], int] = {}
+    pair_to_words: dict[tuple[bytes, bytes], set[int]] = {}
+
+    for word_id, word in enumerate(words):
+        freq = word_freqs[word_id]
+
+        for i in range(len(word) - 1):
+            pair = (word[i], word[i + 1])
+
+            pair_counts[pair] = pair_counts.get(pair, 0) + freq
+
+            if pair not in pair_to_words:
+                pair_to_words[pair] = set()
+            pair_to_words[pair].add(word_id)
+
+    # 7. 迭代训练 BPE
+    while len(vocab) < vocab_size:
+        if not pair_counts:
+            break
+
+        # 7.1 选择最高频 pair
+        # 频率相同的时候，选择字典序更大的 pair
+        most_frequent_pair = max(
+            pair_counts,
+            key=lambda pair: (pair_counts[pair], pair),
+        )
+
+        # 7.2 加入 merge_rule 和 vocab
+        merge_rule.append(most_frequent_pair)
+        vocab[len(vocab)] = most_frequent_pair[0] + most_frequent_pair[1]
+
+        # 7.3 只更新包含 most_frequent_pair 的那些 word
+        affected_word_ids = list(pair_to_words.get(most_frequent_pair, set()))
+
+        for word_id in affected_word_ids:
+            old_word = words[word_id]
+            freq = word_freqs[word_id]
+
+            # 先删除这个 old_word 对 pair_counts / pair_to_words 的旧贡献
+            for i in range(len(old_word) - 1):
+                old_pair = (old_word[i], old_word[i + 1])
+
+                new_count = pair_counts.get(old_pair, 0) - freq
+                if new_count > 0:
+                    pair_counts[old_pair] = new_count
+                else:
+                    pair_counts.pop(old_pair, None)
+
+                if old_pair in pair_to_words:
+                    pair_to_words[old_pair].discard(word_id)
+                    if not pair_to_words[old_pair]:
+                        del pair_to_words[old_pair]
+
+            # 在当前 word 中合并 most_frequent_pair
+            new_word: list[bytes] = []
+            i = 0
+
+            while i < len(old_word):
+                if (
+                    i < len(old_word) - 1
+                    and old_word[i] == most_frequent_pair[0]
+                    and old_word[i + 1] == most_frequent_pair[1]
+                ):
+                    new_word.append(most_frequent_pair[0] + most_frequent_pair[1])
+                    i += 2
+                else:
+                    new_word.append(old_word[i])
+                    i += 1
+
+            words[word_id] = new_word
+
+            # 再加入 new_word 对 pair_counts / pair_to_words 的新贡献
+            for i in range(len(new_word) - 1):
+                new_pair = (new_word[i], new_word[i + 1])
+
+                pair_counts[new_pair] = pair_counts.get(new_pair, 0) + freq
+
+                if new_pair not in pair_to_words:
+                    pair_to_words[new_pair] = set()
+                pair_to_words[new_pair].add(word_id)
+
+    return vocab, merge_rule
+    
+def merge_token(
+    token: tuple[bytes, ...],
+    pair: tuple[bytes, bytes],
+) -> tuple[bytes, ...]:
+    merged: list[bytes] = []
+    i = 0
+
+    while i < len(token):
+        if (
+            i < len(token) - 1
+            and token[i] == pair[0]
+            and token[i + 1] == pair[1]
+        ):
+            merged.append(pair[0] + pair[1])
+            i += 2
+        else:
+            merged.append(token[i])
+            i += 1
+
+    return tuple(merged)
+
+def read_corpus(input_path: str | os.PathLike) -> bytes:
+    with open(input_path, "rb") as f:
+        return f.read()
 
 def find_chunk_boundaries(
-    file: BinaryIO,
-    desired_num_chunks: int,
-    split_special_token: bytes,
-) -> list[int]:
+    train_data: bytes,
+    split_special_tokens: list[str],
+) -> list[tuple[int, int]]:
     """
-    Chunk the file into parts that can be counted independently.
-    May return fewer chunks if the boundaries end up overlapping.
+    Split train_data into chunks according to special tokens.
+
+    Args:
+        train_data:
+            Corpus data read in binary mode, i.e. bytes.
+        split_special_tokens:
+            A list of special token strings. These special tokens are used as
+            split markers and will not be included in returned chunks.
+
+    Returns:
+        A list of (start, end) byte offsets.
+        Each range is [start, end), excluding special tokens.
     """
-    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
 
-    # Get total file size in bytes
-    file.seek(0, os.SEEK_END)
-    file_size = file.tell()
-    file.seek(0)
+    if not isinstance(train_data, bytes):
+        raise TypeError("train_data must be bytes. Open the file with 'rb'.")
 
-    chunk_size = file_size // desired_num_chunks
+    if not isinstance(split_special_tokens, list):
+        raise TypeError("split_special_tokens must be a list[str].")
 
-    # Initial guesses for chunk boundary locations, uniformly spaced
-    # Chunks start on previous index, don't include last index
-    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
-    chunk_boundaries[-1] = file_size
+    if len(split_special_tokens) == 0:
+        return [(0, len(train_data))] if len(train_data) > 0 else []
 
-    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+    split_tokens: list[bytes] = []
 
-    for bi in range(1, len(chunk_boundaries) - 1):
-        initial_position = chunk_boundaries[bi]
-        file.seek(initial_position)  # Start at boundary guess
-        while True:
-            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+    for token in split_special_tokens:
+        if not isinstance(token, str):
+            raise TypeError("Each special token must be a str.")
 
-            # If EOF, this boundary should be at the end of the file
-            if mini_chunk == b"":
-                chunk_boundaries[bi] = file_size
+        if token == "":
+            raise ValueError("split_special_tokens cannot contain empty string.")
+
+        split_tokens.append(token.encode("utf-8"))
+
+    # 如果存在前缀关系，例如：
+    # "<|end|>" 和 "<|endoftext|>"
+    # 应该优先匹配更长的 special token。
+    split_tokens.sort(key=len, reverse=True)
+
+    boundaries: list[tuple[int, int]] = []
+
+    chunk_start = 0
+    i = 0
+    n = len(train_data)
+
+    while i < n:
+        matched_token: Optional[bytes] = None
+
+        for special_token in split_tokens:
+            if train_data.startswith(special_token, i):
+                matched_token = special_token
                 break
 
-            # Find the special token in the mini chunk
-            found_at = mini_chunk.find(split_special_token)
-            if found_at != -1:
-                chunk_boundaries[bi] = initial_position + found_at
-                break
-            initial_position += mini_chunk_size
+        if matched_token is None:
+            i += 1
+            continue
 
-    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
-    return sorted(set(chunk_boundaries))
+        # 当前 normal text chunk 是 [chunk_start, i)
+        # i 是 special token 的起始位置，所以 special token 不会被包含进去。
+        if chunk_start < i:
+            boundaries.append((chunk_start, i))
 
-def pre_tokenize(text: str) -> dict[str, int]:
+        # 跳过 special token
+        i += len(matched_token)
+
+        # 下一个 chunk 从 special token 后面开始
+        chunk_start = i
+
+    # 处理最后一段 normal text
+    if chunk_start < n:
+        boundaries.append((chunk_start, n))
+
+    return boundaries
+
+def pre_tokenize(text: str) -> dict[tuple[bytes, ...], int]:
 
     PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-    tokens = {}
+    tokens: dict[tuple[bytes, ...], int] = {}
+
     for item in re.finditer(PAT, text):
         token = item.group()
-        # start = item.start()
-        if token not in tokens:
-            tokens[token] = 1
-        else:
-            tokens[token] += 1
+
+        # 把字符串 token 转成 UTF-8 bytes，然后每个 byte 单独作为一个初始 token
+        # bpe 这里会把任何一种字符变成字节码(包括英文字母，汉字等)
+        byte_tuple = tuple(bytes([b]) for b in token.encode("utf-8"))
+
+        tokens[byte_tuple] = tokens.get(byte_tuple, 0) + 1
+
     return tokens
         
     
