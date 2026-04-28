@@ -1,5 +1,7 @@
 import json
 import time
+from pathlib import Path
+import resource
 
 from .adapters import run_train_bpe
 from .common import FIXTURES_PATH, gpt2_bytes_to_unicode
@@ -86,3 +88,124 @@ def test_train_bpe_special_tokens(snapshot):
             "merges": merges,
         },
     )
+
+def _bytes_to_gpt2_string(token: bytes) -> str:
+    byte_encoder = gpt2_bytes_to_unicode()
+    return "".join(byte_encoder[b] for b in token)
+
+
+def _save_bpe_result(
+    vocab: dict[int, bytes],
+    merges: list[tuple[bytes, bytes]],
+    output_dir: Path,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    vocab_json = {
+        _bytes_to_gpt2_string(token_bytes): token_id
+        for token_id, token_bytes in vocab.items()
+    }
+
+    vocab_path = output_dir / "vocab.json"
+    with open(vocab_path, "w", encoding="utf-8") as f:
+        json.dump(vocab_json, f, ensure_ascii=False, indent=2)
+
+    merges_path = output_dir / "merges.txt"
+    with open(merges_path, "w", encoding="utf-8") as f:
+        for left, right in merges:
+            left_s = _bytes_to_gpt2_string(left)
+            right_s = _bytes_to_gpt2_string(right)
+            f.write(f"{left_s} {right_s}\n")
+
+
+def _print_bpe_summary(
+    name: str,
+    vocab: dict[int, bytes],
+    merges: list[tuple[bytes, bytes]],
+    elapsed_time: float,
+) -> None:
+    longest_token = max(vocab.values(), key=len)
+    max_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+
+    print()
+    print("=" * 80)
+    print(f"BPE experiment: {name}")
+    print("=" * 80)
+    print(f"vocab size: {len(vocab)}")
+    print(f"number of merges: {len(merges)}")
+    print(f"training time: {elapsed_time:.2f} seconds")
+    print(f"max RSS: {max_rss_mb:.2f} MB")
+    print(f"longest token length: {len(longest_token)} bytes")
+    print(f"longest token repr: {repr(longest_token)}")
+    print(
+        "longest token decoded:",
+        longest_token.decode("utf-8", errors="replace"),
+    )
+    print("=" * 80)
+    print()
+
+
+def test_train_bpe_tinystories():
+    input_path = Path(
+        "/root/WorkSpace/cs336/assignment1-basics/data/"
+        "TinyStoriesV2-GPT4-train.txt"
+    )
+    output_dir = Path(
+        "/root/WorkSpace/cs336/assignment1-basics/bpe_outputs/"
+        "tinystories_10k"
+    )
+
+    start_time = time.time()
+    vocab, merges = run_train_bpe(
+        input_path=input_path,
+        vocab_size=10000,
+        special_tokens=["<|endoftext|>"],
+    )
+    end_time = time.time()
+
+    _save_bpe_result(vocab, merges, output_dir)
+    _print_bpe_summary(
+        name="tinystories_10k",
+        vocab=vocab,
+        merges=merges,
+        elapsed_time=end_time - start_time,
+    )
+
+    assert len(vocab) == 10000
+    assert b"<|endoftext|>" in set(vocab.values())
+    assert len(merges) == 10000 - 256 - 1
+    assert (output_dir / "vocab.json").exists()
+    assert (output_dir / "merges.txt").exists()
+
+
+def test_train_bpe_expts_owt():
+    input_path = Path(
+        "/root/WorkSpace/cs336/assignment1-basics/data/"
+        "owt_train.txt"
+    )
+    output_dir = Path(
+        "/root/WorkSpace/cs336/assignment1-basics/bpe_outputs/"
+        "owt_32k"
+    )
+
+    start_time = time.time()
+    vocab, merges = run_train_bpe(
+        input_path=input_path,
+        vocab_size=32000,
+        special_tokens=["<|endoftext|>"],
+    )
+    end_time = time.time()
+
+    _save_bpe_result(vocab, merges, output_dir)
+    _print_bpe_summary(
+        name="owt_32k",
+        vocab=vocab,
+        merges=merges,
+        elapsed_time=end_time - start_time,
+    )
+
+    assert len(vocab) == 32000
+    assert b"<|endoftext|>" in set(vocab.values())
+    assert len(merges) == 32000 - 256 - 1
+    assert (output_dir / "vocab.json").exists()
+    assert (output_dir / "merges.txt").exists()
