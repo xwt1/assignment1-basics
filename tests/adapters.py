@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import regex as re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import IO, Any, BinaryIO
 
 import numpy.typing as npt
@@ -560,8 +560,295 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
+    bpe = BpeTokenizer(vocab=vocab, merges=merges, special_tokens=special_tokens)
+    return bpe
     
-    pass
+
+# class PreTokenizer:
+#     def __init__(self):
+#         self.pattern = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+
+# class BpeTokenizer:
+#     def __init__(
+#         self,
+#         vocab: dict[int, bytes],
+#         merges: list[tuple[bytes, bytes]],
+#         special_tokens: list[str] | None = None,
+#     ):
+#         self.vocab = vocab
+#         self.merges = merges
+#         self.special_tokens = special_tokens or []
+#         # 创建一个vocab的bytes到id的反向映射
+#         self.rev_vocab = {token_bytes: token_id for token_id, token_bytes in vocab.items()}
+#     def from_files(cls, vocab_filepath: str, merges_filepath:str, special_tokens: list[str] | None = None):
+#         # 暂时没有函数调用这个，所以先不实现了
+#         pass
+#     # def encode(self, text: str) -> list[int]: 
+#     #     # 总任务: 将输入文本编码成 token id 列表
+#     #     # 1. 先标记特殊字符
+#     #     text_split_by_specialToken = split_text_by_special_tokens(text, self.special_tokens)
+
+        
+#     #     token_ids: list[int] = []
+#     #     # 3. 对于每一个pre_token，不停地循环其能够使用的merge 策略，直到无法使用为止
+#     #     for idx1, (text_str, is_special) in enumerate(text_split_by_specialToken):
+#     #         if is_special:
+#     #             # 特殊将special按照vocab处理成一个token id
+#     #             special_token_id = self.rev_vocab.get(text_str.encode("utf-8"), -1)
+#     #             if special_token_id == -1:
+#     #                 raise ValueError(f"Special token {text_str} not found in vocabulary.")
+#     #             token_ids.append(special_token_id)
+#     #             continue
+#     #         # 使用pre_tokenizer将输入文本分成pre_token列表
+#     #         pre_token_list = pre_tokenize_text(text_str) 
+
+#     #         for idx, pre_token in enumerate(pre_token_list):
+#     #             new_pre_token, merged = find_and_merge_pair(pre_token, self.merges)
+#     #             if not merged:
+#     #                 break
+#     #             pre_token_list[idx] = new_pre_token
+#     #         text_split_by_specialToken[idx1].text_str = pre_token_list
+#     #     # 4. 将每个pre_token转换成token id
+
+#     #     for pre_token in text_split_by_specialToken:
+#     #         for bytes_token in pre_token:
+#     #             token_id = self.rev_vocab.get(bytes_token,-1)
+#     #             if token_id == -1:
+#     #                 raise ValueError(f"Token {bytes_token} not found in vocabulary.")
+#     #             token_ids.append(token_id)
+#     #     return token_ids
+#     def encode(self, text: str) -> list[int]:
+#         # 总任务: 将输入文本编码成 token id 列表
+
+#         # 1. 先按照 special_tokens 切分文本
+#         # text_split_by_specialToken 中的元素形如:
+#         #   (text_str, is_special)
+#         text_split_by_specialToken = split_text_by_special_tokens(
+#             text,
+#             self.special_tokens,
+#         )
+
+#         token_ids: list[int] = []
+
+#         # 2. 依次处理每一段文本
+#         for text_str, is_special in text_split_by_specialToken:
+#             if is_special:
+#                 # special token 直接按照 vocab 处理成一个 token id
+#                 special_token_bytes = text_str.encode("utf-8")
+#                 special_token_id = self.rev_vocab.get(special_token_bytes, -1)
+
+#                 if special_token_id == -1:
+#                     raise ValueError(
+#                         f"Special token {text_str} not found in vocabulary."
+#                     )
+
+#                 token_ids.append(special_token_id)
+#                 continue
+
+#             # 3. 普通文本先经过 pre-tokenizer
+#             # 假设 pre_tokenize_text 返回:
+#             #   list[tuple[bytes, ...]]
+#             pre_token_list = pre_tokenize_text(text_str)
+
+#             # 4. 对每一个 pre_token，不断应用 merge，直到不能继续 merge
+#             for idx, _ in enumerate(pre_token_list):
+#                 while True:
+#                     new_pre_token, merged = find_and_merge_pair(
+#                         pre_token_list[idx],
+#                         self.merges,
+#                     )
+
+#                     if not merged:
+#                         break
+
+#                     pre_token_list[idx] = new_pre_token
+
+#                 # 5. 将最终的 bytes token 转换成 token id
+#                 for bytes_token in pre_token_list[idx]:
+#                     token_id = self.rev_vocab.get(bytes_token, -1)
+
+#                     if token_id == -1:
+#                         raise ValueError(
+#                             f"Token {bytes_token} not found in vocabulary."
+#                         )
+
+#                     token_ids.append(token_id)
+
+#         return token_ids
+
+#     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+#         # 挨个遍历iterable中的文本，编码成token id，并yield每个token id
+#         for item in iterable:
+#             token_ids = self.encode(item)
+#             for token_id in token_ids:
+#                 yield token_id
+
+#     def decode(self, token_ids: list[int]) -> str:
+#         # 将token id列表转换回文本
+#         bytes_tokens = [self.vocab[token_id] for token_id in token_ids]
+#         text = b"".join(bytes_tokens).decode("utf-8",errors="replace")
+#         return text
+
+# 把merge的逻辑改成dict，减少匹配数量
+class BpeTokenizer:
+    def __init__(
+        self,
+        vocab: dict[int, bytes],
+        merges: list[tuple[bytes, bytes]],
+        special_tokens: list[str] | None = None,
+    ):
+        self.vocab = vocab
+        self.merges = merges
+        self.special_tokens = special_tokens or []
+
+        self.rev_vocab = {
+            token_bytes: token_id
+            for token_id, token_bytes in vocab.items()
+        }
+
+        self.merge_rank = {
+            pair: rank
+            for rank, pair in enumerate(merges)
+        }
+
+    def encode(self, text: str) -> list[int]:
+        text_split_by_specialToken = split_text_by_special_tokens(
+            text,
+            self.special_tokens,
+        )
+
+        token_ids: list[int] = []
+
+        for text_str, is_special in text_split_by_specialToken:
+            if is_special:
+                special_token_bytes = text_str.encode("utf-8")
+                special_token_id = self.rev_vocab.get(special_token_bytes, -1)
+
+                if special_token_id == -1:
+                    raise ValueError(
+                        f"Special token {text_str} not found in vocabulary."
+                    )
+
+                token_ids.append(special_token_id)
+                continue
+
+            pre_token_list = pre_tokenize_text(text_str)
+
+            for pre_token in pre_token_list:
+                while True:
+                    pre_token, merged = find_and_merge_pair(
+                        pre_token,
+                        self.merge_rank,
+                    )
+
+                    if not merged:
+                        break
+
+                for bytes_token in pre_token:
+                    token_id = self.rev_vocab.get(bytes_token, -1)
+
+                    if token_id == -1:
+                        raise ValueError(
+                            f"Token {bytes_token} not found in vocabulary."
+                        )
+
+                    token_ids.append(token_id)
+
+        return token_ids
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for item in iterable:
+            for token_id in self.encode(item):
+                yield token_id
+
+    def decode(self, token_ids: list[int]) -> str:
+        bytes_tokens = [self.vocab[token_id] for token_id in token_ids]
+        return b"".join(bytes_tokens).decode("utf-8", errors="replace")
+    
+# def find_and_merge_pair(
+#     pre_token: tuple[bytes, ...],
+#     merges: list[tuple[bytes, bytes]],
+# ) -> tuple[tuple[bytes, ...], bool]:
+#     """
+#     给定一个 pre_token，例如：
+
+#         (b'l', b'o', b'w', b'e', b'r')
+
+#     和一组 merge 规则，例如：
+
+#         [(b'l', b'o'), (b'lo', b'w'), ...]
+
+#     找到第一个可以应用的 merge 规则，并对 pre_token 中所有匹配位置进行合并。
+
+#     返回：
+#         new_pre_token: 合并后的 pre_token
+#         merged: 是否发生了合并
+#     """
+
+#     # 按 merges 的顺序找第一个能应用的规则
+#     for merge in merges:
+#         left, right = merge
+
+#         # 先检查这个 merge 是否能在 pre_token 中找到
+#         found = False
+#         for i in range(len(pre_token) - 1):
+#             if pre_token[i] == left and pre_token[i + 1] == right:
+#                 found = True
+#                 break
+
+#         if not found:
+#             continue
+
+#         # 找到了可以应用的 merge 规则，开始真正合并
+#         new_pre_token: list[bytes] = []
+#         i = 0
+
+#         while i < len(pre_token):
+#             if (
+#                 i < len(pre_token) - 1
+#                 and pre_token[i] == left
+#                 and pre_token[i + 1] == right
+#             ):
+#                 new_pre_token.append(left + right)
+#                 i += 2
+#             else:
+#                 new_pre_token.append(pre_token[i])
+#                 i += 1
+
+#         return tuple(new_pre_token), True
+
+#     # 所有 merge 规则都无法应用
+#     return pre_token, False
+def find_and_merge_pair(
+    pre_token: tuple[bytes, ...],
+    merge_rank: dict[tuple[bytes, bytes], int],
+) -> tuple[tuple[bytes, ...], bool]:
+    if len(pre_token) < 2:
+        return pre_token, False
+
+    best_idx = -1
+    best_rank = float("inf")
+
+    for i in range(len(pre_token) - 1):
+        pair = (pre_token[i], pre_token[i + 1])
+        rank = merge_rank.get(pair)
+
+        if rank is not None and rank < best_rank:
+            best_rank = rank
+            best_idx = i
+
+    if best_idx == -1:
+        return pre_token, False
+
+    merged_token = pre_token[best_idx] + pre_token[best_idx + 1]
+
+    new_pre_token = (
+        pre_token[:best_idx]
+        + (merged_token,)
+        + pre_token[best_idx + 2:]
+    )
+
+    return new_pre_token, True
 
 
 def run_train_bpe(
@@ -794,6 +1081,60 @@ def find_chunk_boundaries(
         boundaries.append((chunk_start, n))
 
     return boundaries
+
+def split_text_by_special_tokens(
+    text: str,
+    special_tokens: list[str] | None = None,
+) -> list[tuple[str, bool]]:
+    """
+    返回 [(片段, 是否为 special token), ...]
+    """
+    special_tokens = special_tokens or []
+
+    if not special_tokens:
+        return [(text, False)] if text else []
+
+    # 长的 special token 放前面，处理 overlapping special tokens
+    escaped_specials = [
+        re.escape(tok)
+        for tok in sorted(special_tokens, key=len, reverse=True)
+    ]
+
+    # 加括号，re.split 才会保留 special token 本身
+    special_pat = "(" + "|".join(escaped_specials) + ")"
+
+    parts = re.split(special_pat, text)
+    special_set = set(special_tokens)
+
+    result: list[tuple[str, bool]] = []
+
+    for part in parts:
+        if part == "":
+            continue
+
+        if part in special_set:
+            result.append((part, True))
+        else:
+            result.append((part, False))
+
+    return result
+
+def pre_tokenize_text(text: str) -> list[tuple[bytes, ...]]:
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+    pre_tokens: list[tuple[bytes, ...]] = []
+
+    for item in re.finditer(PAT, text):
+        token = item.group()
+
+        byte_tuple = tuple(
+            bytes([b])
+            for b in token.encode("utf-8")
+        )
+
+        pre_tokens.append(byte_tuple)
+
+    return pre_tokens
 
 def pre_tokenize(text: str) -> dict[tuple[bytes, ...], int]:
 
